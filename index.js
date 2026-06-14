@@ -1,14 +1,15 @@
 const { Client, LocalAuth } = require('whatsapp-web.js');
-const qrcode = require('qrcode-terminal');
+const qrcode = require('qrcode');
+const http = require('http');
 const Anthropic = require('@anthropic-ai/sdk');
 
 // ── Configuration ──────────────────────────────────────────────
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const MAX_HISTORY = 10; // messages to remember per customer
+const MAX_HISTORY = 10;
+const PORT = process.env.PORT || 3000;
 
-// Your phone number — the bot will NEVER auto-reply to your own messages
-// Format: 256 (Uganda code) + number without leading 0
-const OWNER_PHONE = '256702370441@c.us'; // 0702370441
+// Your phone number — bot stays silent when you text yourself
+const OWNER_PHONE = '256702370441@c.us';
 
 const SYSTEM_PROMPT = `You are an expert AI Customer Service Assistant for Glo Med, a premium pharmaceutical and medical distribution company in Uganda. You handle incoming customer queries via WhatsApp professionally and entirely for free.
 
@@ -36,22 +37,65 @@ Response Rules:
 - Medical disclaimer: If asked for diagnosis or prescription advice, provide general info and always add: "🩺 Please consult a qualified medical professional for specific diagnoses and prescriptions."
 - Strictly decline non-pharmaceutical topics politely.`;
 
-// ── Conversation memory (per customer phone number) ────────────
+// ── QR code web page ───────────────────────────────────────────
+let currentQR = null;
+let botStatus = 'waiting'; // waiting | ready
+
+const server = http.createServer(async (req, res) => {
+  res.setHeader('Content-Type', 'text/html');
+
+  if (botStatus === 'ready') {
+    res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:40px;background:#e8f5e9">
+      <h1 style="color:#2e7d32">✅ Glo Med Bot is LIVE!</h1>
+      <p style="font-size:18px">WhatsApp is connected and responding to customers.</p>
+      <p>Number: <strong>0702370441</strong></p>
+    </body></html>`);
+    return;
+  }
+
+  if (!currentQR) {
+    res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:40px">
+      <h2>⏳ Glo Med Bot Starting...</h2>
+      <p>QR code is loading. Please refresh this page in 15 seconds.</p>
+      <script>setTimeout(()=>location.reload(), 8000)</script>
+    </body></html>`);
+    return;
+  }
+
+  try {
+    const qrImage = await qrcode.toDataURL(currentQR, { width: 300, margin: 2 });
+    res.end(`<!DOCTYPE html><html><head>
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      <title>Glo Med - Scan QR</title>
+    </head><body style="font-family:sans-serif;text-align:center;padding:20px;background:#f5f5f5">
+      <h2 style="color:#128C7E">📱 Glo Med WhatsApp Bot</h2>
+      <p>Open WhatsApp → <strong>Linked Devices</strong> → <strong>Link a Device</strong><br>then scan this QR code:</p>
+      <img src="${qrImage}" style="width:280px;height:280px;border:4px solid #128C7E;border-radius:12px" />
+      <p style="color:#666;font-size:13px">QR code expires in 60 seconds. Page refreshes automatically.</p>
+      <script>setTimeout(()=>location.reload(), 30000)</script>
+    </body></html>`);
+  } catch (e) {
+    res.end('<h2>Error generating QR. Please refresh.</h2>');
+  }
+});
+
+server.listen(PORT, () => {
+  console.log(`🌐 QR page running on port ${PORT}`);
+  console.log(`👉 Open your Railway public URL to scan the QR code`);
+});
+
+// ── Conversation memory ────────────────────────────────────────
 const customerHistories = new Map();
 
 function getHistory(phone) {
-  if (!customerHistories.has(phone)) {
-    customerHistories.set(phone, []);
-  }
+  if (!customerHistories.has(phone)) customerHistories.set(phone, []);
   return customerHistories.get(phone);
 }
 
 function addToHistory(phone, role, content) {
   const history = getHistory(phone);
   history.push({ role, content });
-  if (history.length > MAX_HISTORY) {
-    history.splice(0, history.length - MAX_HISTORY);
-  }
+  if (history.length > MAX_HISTORY) history.splice(0, history.length - MAX_HISTORY);
 }
 
 // ── Anthropic client ───────────────────────────────────────────
@@ -59,15 +103,12 @@ const anthropic = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
 
 async function getAIReply(phone, userMessage) {
   addToHistory(phone, 'user', userMessage);
-  const history = getHistory(phone);
-
   const response = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
     max_tokens: 1024,
     system: SYSTEM_PROMPT,
-    messages: history,
+    messages: getHistory(phone),
   });
-
   const reply = response.content[0].text;
   addToHistory(phone, 'assistant', reply);
   return reply;
@@ -91,12 +132,14 @@ const client = new Client({
 });
 
 client.on('qr', (qr) => {
-  console.log('\n📱 Scan this QR code with your WhatsApp:\n');
-  qrcode.generate(qr, { small: true });
-  console.log('\nOpen WhatsApp → Settings → Linked Devices → Link a Device\n');
+  currentQR = qr;
+  botStatus = 'waiting';
+  console.log('📱 QR code ready! Open your Railway public URL in a browser to scan it.');
 });
 
 client.on('ready', () => {
+  botStatus = 'ready';
+  currentQR = null;
   console.log('✅ Glo Med WhatsApp Bot is LIVE and ready to receive messages!');
 });
 
@@ -105,20 +148,17 @@ client.on('auth_failure', (msg) => {
 });
 
 client.on('disconnected', (reason) => {
-  console.log('⚠️  Bot disconnected:', reason);
-  console.log('Attempting to reconnect...');
+  console.log('⚠️ Bot disconnected:', reason);
+  botStatus = 'waiting';
   client.initialize();
 });
 
 client.on('message', async (message) => {
-  // Ignore group messages, status updates, and messages from self
   if (message.isGroupMsg || message.from === 'status@broadcast' || message.fromMe) return;
 
   const phone = message.from;
-
-  // Never auto-reply to your own number — you can still use WhatsApp normally
   if (phone === OWNER_PHONE) {
-    console.log('👤 [OWNER] Message from your own number — bot is silent.');
+    console.log('👤 [OWNER] Your own message — bot is silent.');
     return;
   }
 
@@ -127,7 +167,6 @@ client.on('message', async (message) => {
 
   console.log(`📨 [${new Date().toLocaleTimeString()}] From ${phone}: ${text}`);
 
-  // Show "typing..." indicator
   const chat = await message.getChat();
   await chat.sendStateTyping();
 
@@ -136,9 +175,9 @@ client.on('message', async (message) => {
     await message.reply(reply);
     console.log(`✅ Replied to ${phone}`);
   } catch (error) {
-    console.error('❌ Error getting AI reply:', error.message);
+    console.error('❌ Error:', error.message);
     await message.reply(
-      "⚠️ Sorry, I'm experiencing a brief technical issue. Please try again in a moment, or call us directly on *0702370441* for urgent orders.\n\nThank you for your patience! 🙏"
+      "⚠️ Sorry, I'm having a brief technical issue. Please try again or call *0702370441* directly. Thank you! 🙏"
     );
   }
 });

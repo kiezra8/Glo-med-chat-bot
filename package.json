@@ -1,14 +1,14 @@
 {
-  "name": "mediserve-whatsapp-bot",
+  "name": "glomed-whatsapp-bot",
   "version": "1.0.0",
-  "description": "MediServe AI WhatsApp Customer Service Bot",
+  "description": "Glo Med AI WhatsApp Customer Service Bot",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.24.0",
-    "qrcode-terminal": "^0.12.0",
+    "qrcode": "^1.5.3",
     "whatsapp-web.js": "^1.23.0"
   },
   "engines": {
