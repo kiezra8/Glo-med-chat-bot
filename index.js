@@ -1,14 +1,15 @@
-const { Client, LocalAuth } = require('whatsapp-web.js');
+const { Client, RemoteAuth } = require('whatsapp-web.js');
+const { MongoStore } = require('wwebjs-mongo');
+const mongoose = require('mongoose');
 const qrcode = require('qrcode');
 const http = require('http');
 const Anthropic = require('@anthropic-ai/sdk');
 
 // ── Configuration ──────────────────────────────────────────────
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const MONGODB_URI = process.env.MONGODB_URI;
 const MAX_HISTORY = 10;
 const PORT = process.env.PORT || 3000;
-
-// Your phone number — bot stays silent when you text yourself
 const OWNER_PHONE = '256702370441@c.us';
 
 const SYSTEM_PROMPT = `You are an expert AI Customer Service Assistant for Glo Med, a premium pharmaceutical and medical distribution company in Uganda. You handle incoming customer queries via WhatsApp professionally and entirely for free.
@@ -37,51 +38,48 @@ Response Rules:
 - Medical disclaimer: If asked for diagnosis or prescription advice, provide general info and always add: "🩺 Please consult a qualified medical professional for specific diagnoses and prescriptions."
 - Strictly decline non-pharmaceutical topics politely.`;
 
-// ── QR code web page ───────────────────────────────────────────
+// ── QR web server ──────────────────────────────────────────────
 let currentQR = null;
-let botStatus = 'waiting'; // waiting | ready
+let botStatus = 'starting';
 
 const server = http.createServer(async (req, res) => {
   res.setHeader('Content-Type', 'text/html');
 
   if (botStatus === 'ready') {
-    res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:40px;background:#e8f5e9">
+    return res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:40px;background:#e8f5e9">
       <h1 style="color:#2e7d32">✅ Glo Med Bot is LIVE!</h1>
-      <p style="font-size:18px">WhatsApp is connected and responding to customers.</p>
+      <p style="font-size:18px">WhatsApp connected and replying to customers 24/7.</p>
       <p>Number: <strong>0702370441</strong></p>
     </body></html>`);
-    return;
   }
 
   if (!currentQR) {
-    res.end(`<!DOCTYPE html><html><body style="font-family:sans-serif;text-align:center;padding:40px">
+    return res.end(`<!DOCTYPE html><html><head><meta http-equiv="refresh" content="8"></head>
+    <body style="font-family:sans-serif;text-align:center;padding:40px">
       <h2>⏳ Glo Med Bot Starting...</h2>
-      <p>QR code is loading. Please refresh this page in 15 seconds.</p>
-      <script>setTimeout(()=>location.reload(), 8000)</script>
+      <p>QR code loading. Page refreshes automatically every 8 seconds.</p>
     </body></html>`);
-    return;
   }
 
   try {
     const qrImage = await qrcode.toDataURL(currentQR, { width: 300, margin: 2 });
     res.end(`<!DOCTYPE html><html><head>
       <meta name="viewport" content="width=device-width,initial-scale=1">
+      <meta http-equiv="refresh" content="25">
       <title>Glo Med - Scan QR</title>
     </head><body style="font-family:sans-serif;text-align:center;padding:20px;background:#f5f5f5">
       <h2 style="color:#128C7E">📱 Glo Med WhatsApp Bot</h2>
-      <p>Open WhatsApp → <strong>Linked Devices</strong> → <strong>Link a Device</strong><br>then scan this QR code:</p>
+      <p>Open WhatsApp → <strong>Linked Devices</strong> → <strong>Link a Device</strong><br>then scan:</p>
       <img src="${qrImage}" style="width:280px;height:280px;border:4px solid #128C7E;border-radius:12px" />
-      <p style="color:#666;font-size:13px">QR code expires in 60 seconds. Page refreshes automatically.</p>
-      <script>setTimeout(()=>location.reload(), 30000)</script>
+      <p style="color:#666;font-size:13px">Page auto-refreshes. Scan quickly!</p>
     </body></html>`);
   } catch (e) {
-    res.end('<h2>Error generating QR. Please refresh.</h2>');
+    res.end('<h2>Error generating QR. Refresh the page.</h2>');
   }
 });
 
 server.listen(PORT, () => {
   console.log(`🌐 QR page running on port ${PORT}`);
-  console.log(`👉 Open your Railway public URL to scan the QR code`);
 });
 
 // ── Conversation memory ────────────────────────────────────────
@@ -114,74 +112,86 @@ async function getAIReply(phone, userMessage) {
   return reply;
 }
 
-// ── WhatsApp client ────────────────────────────────────────────
-const client = new Client({
-  authStrategy: new LocalAuth({ dataPath: './session' }),
-  puppeteer: {
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-accelerated-2d-canvas',
-      '--no-first-run',
-      '--no-zygote',
-      '--single-process',
-      '--disable-gpu',
-    ],
-  },
-});
+// ── Main startup ───────────────────────────────────────────────
+async function start() {
+  console.log('🔌 Connecting to MongoDB...');
+  await mongoose.connect(MONGODB_URI);
+  console.log('✅ MongoDB connected — session will be saved permanently!');
 
-client.on('qr', (qr) => {
-  currentQR = qr;
-  botStatus = 'waiting';
-  console.log('📱 QR code ready! Open your Railway public URL in a browser to scan it.');
-});
+  const store = new MongoStore({ mongoose });
 
-client.on('ready', () => {
-  botStatus = 'ready';
-  currentQR = null;
-  console.log('✅ Glo Med WhatsApp Bot is LIVE and ready to receive messages!');
-});
+  const client = new Client({
+    authStrategy: new RemoteAuth({
+      store,
+      backupSyncIntervalMs: 300000, // save session every 5 mins
+    }),
+    puppeteer: {
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-accelerated-2d-canvas',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',
+        '--disable-gpu',
+      ],
+    },
+  });
 
-client.on('auth_failure', (msg) => {
-  console.error('❌ Authentication failed:', msg);
-});
+  client.on('qr', async (qr) => {
+    currentQR = qr;
+    botStatus = 'waiting';
+    console.log('📱 QR ready! Open your Railway URL to scan it.');
+  });
 
-client.on('disconnected', (reason) => {
-  console.log('⚠️ Bot disconnected:', reason);
-  botStatus = 'waiting';
+  client.on('ready', () => {
+    botStatus = 'ready';
+    currentQR = null;
+    console.log('✅ Glo Med Bot is LIVE! Session saved to MongoDB permanently.');
+  });
+
+  client.on('remote_session_saved', () => {
+    console.log('💾 Session backed up to MongoDB.');
+  });
+
+  client.on('auth_failure', () => {
+    console.error('❌ Auth failed.');
+    botStatus = 'starting';
+  });
+
+  client.on('disconnected', () => {
+    console.log('⚠️ Disconnected. Restarting...');
+    botStatus = 'starting';
+    setTimeout(() => client.initialize(), 5000);
+  });
+
+  client.on('message', async (message) => {
+    if (message.isGroupMsg || message.from === 'status@broadcast' || message.fromMe) return;
+    if (message.from === OWNER_PHONE) return;
+
+    const text = message.body?.trim();
+    if (!text) return;
+
+    console.log(`📨 [${new Date().toLocaleTimeString()}] From ${message.from}: ${text}`);
+
+    try {
+      const chat = await message.getChat();
+      if (chat.sendStateTyping) await chat.sendStateTyping();
+    } catch (e) {}
+
+    try {
+      const reply = await getAIReply(message.from, text);
+      await message.reply(reply);
+      console.log('✅ Replied');
+    } catch (error) {
+      console.error('❌ Error:', error.message);
+      await message.reply("⚠️ Brief technical issue. Please try again or call *0702370441*. 🙏");
+    }
+  });
+
+  console.log('🚀 Starting Glo Med WhatsApp Bot...');
   client.initialize();
-});
+}
 
-client.on('message', async (message) => {
-  if (message.isGroupMsg || message.from === 'status@broadcast' || message.fromMe) return;
-
-  const phone = message.from;
-  if (phone === OWNER_PHONE) {
-    console.log('👤 [OWNER] Your own message — bot is silent.');
-    return;
-  }
-
-  const text = message.body?.trim();
-  if (!text) return;
-
-  console.log(`📨 [${new Date().toLocaleTimeString()}] From ${phone}: ${text}`);
-
-  const chat = await message.getChat();
-  await chat.sendStateTyping();
-
-  try {
-    const reply = await getAIReply(phone, text);
-    await message.reply(reply);
-    console.log(`✅ Replied to ${phone}`);
-  } catch (error) {
-    console.error('❌ Error:', error.message);
-    await message.reply(
-      "⚠️ Sorry, I'm having a brief technical issue. Please try again or call *0702370441* directly. Thank you! 🙏"
-    );
-  }
-});
-
-// ── Start ──────────────────────────────────────────────────────
-console.log('🚀 Starting Glo Med WhatsApp Bot...');
-client.initialize();
+start().catch(console.error);
