@@ -3,15 +3,13 @@
   "version": "1.0.0",
   "description": "Glo Med AI WhatsApp Customer Service Bot",
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
+  "scripts": { "start": "node index.js" },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.24.0",
     "mongoose": "^8.0.0",
     "qrcode": "^1.5.3",
     "whatsapp-web.js": "^1.23.0",
-    "wwebjs-mongo": "^0.2.0"
+    "wwebjs-mongo": "^0.1.5"
   },
   "engines": {
     "node": ">=18.0.0"
